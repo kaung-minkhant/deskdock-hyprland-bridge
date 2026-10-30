@@ -3,6 +3,7 @@ use crate::{
     config::{Config, Device as ConfiguredDevice, DeviceKind},
     control::ControlSocket,
     keyboard::{KeyAction, KeyboardState},
+    state::Shared,
     synergy,
 };
 use anyhow::{Context, Result, bail};
@@ -54,8 +55,8 @@ pub fn list_devices() -> Result<()> {
     Ok(())
 }
 
-pub fn run(config: Config) -> Result<()> {
-    let tablet_mode = Arc::new(AtomicBool::new(false));
+pub fn run(config: Config, shared: Shared) -> Result<()> {
+    let tablet_mode = Arc::clone(&shared.tablet_mode);
     let (events, event_receiver) = mpsc::channel();
     let configured_paths = config
         .devices
@@ -95,17 +96,29 @@ pub fn run(config: Config) -> Result<()> {
         config.synergy.address, config.synergy.port
     );
 
-    loop {
-        let (stream, peer) = listener
-            .accept()
-            .context("Could not accept DeskDock connection")?;
+    listener
+        .set_nonblocking(true)
+        .context("Could not make the Synergy listener nonblocking")?;
+    while !shared.is_shutdown() {
+        let (stream, peer) = match listener.accept() {
+            Ok(connection) => connection,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Err(error) => return Err(error).context("Could not accept DeskDock connection"),
+        };
         eprintln!("DeskDock connected from {peer}. Sending Synergy handshake...");
-        if let Err(error) = run_session(&config, stream, &event_receiver, &tablet_mode) {
-            tablet_mode.store(false, Ordering::SeqCst);
+        let result = run_session(&config, stream, &event_receiver, &shared);
+        shared.connected.store(false, Ordering::SeqCst);
+        tablet_mode.store(false, Ordering::SeqCst);
+        if let Err(error) = result {
             eprintln!("DeskDock session ended: {error:#}");
             eprintln!("Linux mode restored; waiting for DeskDock to reconnect...");
         }
     }
+    eprintln!("Bridge stopped; devices released to Hyprland.");
+    Ok(())
 }
 
 fn spawn_input_worker(
@@ -207,8 +220,9 @@ fn run_session(
     config: &Config,
     mut stream: TcpStream,
     events: &Receiver<InputEvent>,
-    tablet_mode: &AtomicBool,
+    shared: &Shared,
 ) -> Result<()> {
+    let tablet_mode: &AtomicBool = &shared.tablet_mode;
     synergy::handshake(&mut stream)?;
     synergy::send_frame(&mut stream, &synergy::server_options())?;
     let display_size = if config.tablet.follow_rotation {
@@ -230,14 +244,15 @@ fn run_session(
         &synergy::client_enter(display_size.width, display_size.height),
     )?;
     stream.set_nonblocking(true)?;
-    eprintln!("DeskDock Synergy session active. Press Ctrl+C to stop.");
+    shared.connected.store(true, Ordering::SeqCst);
+    eprintln!("DeskDock Synergy session active.");
 
     let mut display_size = display_size;
     let mut pointer = Pointer::centered(display_size.width, display_size.height);
     let mut tablet_active = false;
     let mut keyboard = KeyboardState::default();
     let mut last_rotation_check = std::time::Instant::now() - ROTATION_CHECK_INTERVAL;
-    loop {
+    while !shared.is_shutdown() {
         if config.tablet.follow_rotation && last_rotation_check.elapsed() >= ROTATION_CHECK_INTERVAL
         {
             last_rotation_check = std::time::Instant::now();
@@ -312,6 +327,13 @@ fn run_session(
             Err(RecvTimeoutError::Disconnected) => bail!("All configured input workers stopped"),
         }
     }
+
+    // Shutting down: never leave keys stuck or the pointer on Android.
+    if tablet_active {
+        keyboard.release_all(&mut stream)?;
+        synergy::send_frame(&mut stream, synergy::client_leave())?;
+    }
+    Ok(())
 }
 
 fn handle_input_event(

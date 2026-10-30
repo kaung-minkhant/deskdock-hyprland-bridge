@@ -134,50 +134,46 @@ This edits DeskDock's local Java preferences at:
 
 It enables Synergy/Barrier, configures `127.0.0.1:24800`, and disables Synergy encryption **only for this same-machine loopback connection**.
 
-## Start the bridge
-
-In a terminal with `input`-group access:
+## Start everything with one command
 
 ```bash
-cd /home/james/Projects/control
-newgrp input       # only until the next graphical login, if needed
-nix run . -- forward
+hypr-android-bridge run
 ```
 
-The bridge reads `~/.config/hypr-android-bridge/config.toml`, begins in **Linux mode**, and creates a local control socket at:
+This single command:
+
+1. points DeskDock at the bridge (the same change as `enable-synergy`, if DeskDock's preferences exist),
+2. starts `deskdock` as a supervised child process and restarts it if it crashes (with back-off),
+3. runs the bridge, beginning in **Linux mode**, and
+4. shows a tray icon in Waybar's `tray` module.
+
+Stop it with `Ctrl+C`, `SIGTERM`, or **Quit** in the tray menu. DeskDock is stopped with it and every captured device is released back to Hyprland. If the bridge is killed outright, DeskDock receives `SIGTERM` from the kernel.
+
+Tray icon colors: **grey** — waiting for the tablet, **blue** — Linux mode, **green** — tablet mode. Clicking the icon opens a menu with *Send input to tablet / Return input to Linux*, *Restart DeskDock*, and *Quit*.
+
+Useful options:
+
+```bash
+hypr-android-bridge run --config /path/to/config.toml   # alternative configuration
+hypr-android-bridge run --no-tray                       # no tray icon
+```
+
+To manage DeskDock yourself, set `launch = false` under `[deskdock]` in `config.toml`. `forward` runs only the bridge, as before. The command DeskDock is started with (default `deskdock`, found through `PATH`) is `deskdock.command`.
+
+The bridge reads `~/.config/hypr-android-bridge/config.toml` and creates a local control socket at:
 
 ```text
 $XDG_RUNTIME_DIR/hypr-android-bridge.sock
 ```
 
-To test a different configuration without changing the default, use:
-
-```bash
-nix run . -- forward --config /path/to/config.toml
-```
-
-## Start DeskDock
-
-In a normal graphical terminal, after the bridge is listening:
-
-```bash
-env -u JAVA_TOOL_OPTIONS -u _JAVA_OPTIONS \
-  DISPLAY=:1 WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/1000 \
-  deskdock
-```
-
-The explicit graphical environment is useful when DeskDock otherwise starts headlessly. Wait for the bridge to print:
-
-```text
-DeskDock Synergy session active.
-```
+The user must be in the `input` group (see Prerequisites).
 
 ## Switch pointer control
 
 From another terminal in the same graphical session:
 
 ```bash
-nix run . -- toggle
+hypr-android-bridge toggle
 ```
 
 - First invocation requests **tablet mode**. Every configured pointer is exclusively captured, and the Android pointer resets to the center.
@@ -221,7 +217,22 @@ nix develop --command cargo clippy -- -D warnings
 - `src/synergy.rs` — minimal Synergy/Barrier framing used by DeskDock.
 - `src/control.rs` — local Unix-socket toggle interface.
 - `src/deskdock.rs` — DeskDock localhost Synergy preference configuration.
+- `src/supervisor.rs` — launches DeskDock, restarts it on failure, and stops it on shutdown.
+- `src/tray.rs` — StatusNotifierItem tray icon and menu.
+- `src/state.rs` — state shared by the bridge, supervisor, and tray.
 
 ## Security notes
 
 The bridge accepts Synergy connections only on loopback and requires access to raw Linux input events. Treat membership in the `input` group as privileged. Keep the DeskDock USB/ADB connection trusted, and do not expose port `24800` beyond localhost.
+
+## Continuous integration and NixOS
+
+`.github/workflows/ci.yml` runs `cargo fmt --check`, `clippy -D warnings`, `cargo test`, and `nix build` on every push and pull request. On `main`, the built package is pushed to the **Cachix** cache `deskdock-wayland-bridge`, so NixOS downloads the CI build instead of compiling.
+
+One-time setup:
+
+1. Create a cache named `deskdock-wayland-bridge` at <https://app.cachix.org>.
+2. Add its auth token as the GitHub repository secret `CACHIX_AUTH_TOKEN`.
+3. Put the cache's public key in your NixOS configuration (see below).
+
+The flake exposes `packages.<system>.default` and `overlays.default`.

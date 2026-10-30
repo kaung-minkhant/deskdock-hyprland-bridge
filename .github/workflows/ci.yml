@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # Name of the Cachix binary cache that NixOS pulls builds from.
+  CACHIX_CACHE: deskdock-wayland-bridge
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+
+      - uses: cachix/cachix-action@v16
+        with:
+          name: ${{ env.CACHIX_CACHE }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # Pull requests from forks have no token: still use the cache, don't push.
+          skipPush: ${{ github.event_name == 'pull_request' }}
+
+      - name: Format
+        run: nix develop -c cargo fmt --check
+
+      - name: Clippy
+        run: nix develop -c cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: nix develop -c cargo test
+
+      # `nix build` output is pushed to Cachix by the action on success.
+      - name: Build package
+        run: nix build .#default --print-build-logs

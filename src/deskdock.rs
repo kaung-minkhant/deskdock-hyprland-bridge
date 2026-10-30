@@ -2,6 +2,15 @@ use anyhow::{Context, Result, bail};
 use std::{fs, path::PathBuf};
 
 pub fn enable_synergy(address: &str, port: u16) -> Result<()> {
+    configure(address)?;
+    println!("Enabled DeskDock Synergy/Barrier integration for {address}:{port}.");
+    println!("Restart DeskDock after the bridge is listening.");
+    println!("Encryption is disabled only because this is a localhost connection.");
+    Ok(())
+}
+
+/// Point DeskDock's saved preferences at the bridge without printing anything.
+pub fn configure(address: &str) -> Result<()> {
     if address.is_empty() || address.contains(['\n', '\r', '"', '&', '<', '>']) {
         bail!("--address must be a plain hostname or IP address");
     }
@@ -14,10 +23,6 @@ pub fn enable_synergy(address: &str, port: u16) -> Result<()> {
     let updated = replace_preference(&updated, "PREF_KEY_SYNERGY_ENCRYPTED", "false")?;
     fs::write(&path, updated)
         .with_context(|| format!("Could not write DeskDock preferences at {}", path.display()))?;
-
-    println!("Enabled DeskDock Synergy/Barrier integration for {address}:{port}.");
-    println!("Restart DeskDock after the bridge is listening.");
-    println!("Encryption is disabled only because this is a localhost connection.");
     Ok(())
 }
 

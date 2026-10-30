@@ -19,7 +19,29 @@ pub struct Config {
     pub synergy: Synergy,
     #[serde(default)]
     pub tablet: Tablet,
+    #[serde(default)]
+    pub deskdock: DeskDock,
     pub devices: Vec<Device>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeskDock {
+    /// Start and supervise DeskDock together with the bridge.
+    #[serde(default = "default_true")]
+    pub launch: bool,
+    /// Executable used to start DeskDock; resolved through PATH.
+    #[serde(default = "default_deskdock_command")]
+    pub command: String,
+}
+
+impl Default for DeskDock {
+    fn default() -> Self {
+        Self {
+            launch: true,
+            command: default_deskdock_command(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -191,6 +213,11 @@ sensitivity = 4
 follow_rotation = true
 # adb_serial = "your-usb-device-serial"
 
+[deskdock]
+# `hypr-android-bridge run` starts and supervises DeskDock for you.
+launch = true
+command = "deskdock"
+
 [[devices]]
 path = "/dev/input/by-id/usb-YICHIP_Wireless_Device_b120300001-if01-event-mouse"
 kind = "mouse"
@@ -207,6 +234,12 @@ kind = "touchpad"
 "#
 }
 
+fn default_true() -> bool {
+    true
+}
+fn default_deskdock_command() -> String {
+    "deskdock".to_owned()
+}
 fn default_address() -> String {
     "127.0.0.1".to_owned()
 }

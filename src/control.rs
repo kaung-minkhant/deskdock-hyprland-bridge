@@ -73,7 +73,7 @@ pub fn toggle() -> Result<()> {
     let path = socket_path()?;
     let mut stream = UnixStream::connect(&path).with_context(|| {
         format!(
-            "Could not connect to {}. Start `hypr-android-bridge forward` first.",
+            "Could not connect to {}. Start `hypr-android-bridge run` first.",
             path.display()
         )
     })?;

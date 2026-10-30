@@ -16,6 +16,12 @@
             version = "0.1.0";
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+            # The bridge shells out to adb to follow Android's rotation.
+            postInstall = ''
+              wrapProgram $out/bin/hypr-android-bridge \
+                --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.android-tools ]}
+            '';
             meta = {
               description = "Hyprland mouse bridge for DeskDock's Synergy/Barrier integration";
               license = pkgs.lib.licenses.mit;
@@ -27,6 +33,14 @@
           default = hypr-android-bridge;
           inherit hypr-android-bridge;
         });
+
+      overlays.default = final: _prev: {
+        hypr-android-bridge = self.packages.${final.stdenv.hostPlatform.system}.default;
+      };
+
+      checks = forAllSystems (system: {
+        build = self.packages.${system}.default;
+      });
 
       apps = forAllSystems (system: {
         default = {
