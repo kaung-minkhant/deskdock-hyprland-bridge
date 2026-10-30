@@ -1,4 +1,5 @@
 use crate::{
+    android::{self, DisplaySize},
     config::{Config, Device as ConfiguredDevice, DeviceKind},
     control::ControlSocket,
     synergy,
@@ -22,6 +23,7 @@ use std::{
 // delivered a completed evdev frame promptly, while a 10 ms worker poll plus
 // socket and channel waits made the multi-device path visibly laggy.
 const POLL_INTERVAL: Duration = Duration::from_millis(1);
+const ROTATION_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
 pub fn list_devices() -> Result<()> {
     let mut devices: Vec<_> = evdev::enumerate()
@@ -182,20 +184,58 @@ fn run_session(
 ) -> Result<()> {
     synergy::handshake(&mut stream)?;
     synergy::send_frame(&mut stream, &synergy::server_options())?;
+    let display_size = if config.tablet.follow_rotation {
+        android::logical_display_size(config.tablet.adb_serial.as_deref()).with_context(|| {
+            "Could not read Android's initial logical display size; disable tablet.follow_rotation to use configured dimensions"
+        })?
+    } else {
+        DisplaySize {
+            width: config.tablet.width,
+            height: config.tablet.height,
+        }
+    };
     synergy::send_frame(
         &mut stream,
-        &synergy::screen_info(config.tablet.width, config.tablet.height),
+        &synergy::screen_info(display_size.width, display_size.height),
     )?;
     synergy::send_frame(
         &mut stream,
-        &synergy::client_enter(config.tablet.width, config.tablet.height),
+        &synergy::client_enter(display_size.width, display_size.height),
     )?;
     stream.set_nonblocking(true)?;
     eprintln!("DeskDock Synergy session active. Press Ctrl+C to stop.");
 
-    let mut pointer = Pointer::centered(config.tablet.width, config.tablet.height);
+    let mut display_size = display_size;
+    let mut pointer = Pointer::centered(display_size.width, display_size.height);
     let mut tablet_active = false;
+    let mut last_rotation_check = std::time::Instant::now() - ROTATION_CHECK_INTERVAL;
     loop {
+        if config.tablet.follow_rotation && last_rotation_check.elapsed() >= ROTATION_CHECK_INTERVAL
+        {
+            last_rotation_check = std::time::Instant::now();
+            match android::logical_display_size(config.tablet.adb_serial.as_deref()) {
+                Ok(size) if size != display_size => {
+                    display_size = size;
+                    pointer.resize(size.width, size.height);
+                    synergy::send_frame(
+                        &mut stream,
+                        &synergy::screen_info(display_size.width, display_size.height),
+                    )?;
+                    if tablet_active {
+                        synergy::send_frame(
+                            &mut stream,
+                            &synergy::mouse_move(pointer.x as i16, pointer.y as i16),
+                        )?;
+                    }
+                    eprintln!(
+                        "Android rotation detected; pointer bounds updated to {}×{}.",
+                        size.width, size.height
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!("Could not refresh Android display size: {error:#}"),
+            }
+        }
         let active = tablet_mode.load(Ordering::SeqCst);
         if active != tablet_active {
             if active {
@@ -214,7 +254,7 @@ fn run_session(
             tablet_active = active;
         }
 
-        synergy::drain_client_messages(&mut stream, config.tablet.width, config.tablet.height)?;
+        synergy::drain_client_messages(&mut stream, display_size.width, display_size.height)?;
         match events.recv_timeout(POLL_INTERVAL) {
             Ok(event) => {
                 handle_input_event(
@@ -257,8 +297,8 @@ fn handle_input_event(
                 &synergy::mouse_move(pointer.x as i16, pointer.y as i16),
             )?;
         }
-        InputEvent::Button { down } if tablet_active => {
-            synergy::send_frame(stream, &synergy::mouse_button(down, 1))?;
+        InputEvent::Button { down, button } if tablet_active => {
+            synergy::send_frame(stream, &synergy::mouse_button(down, button.synergy_code()))?;
         }
         InputEvent::Wheel { y } if tablet_active => {
             synergy::send_frame(stream, &synergy::mouse_wheel(0, y.signum() as i16))?;
@@ -273,9 +313,26 @@ fn handle_input_event(
 
 enum InputEvent {
     Motion { x: i32, y: i32 },
-    Button { down: bool },
+    Button { down: bool, button: MouseButton },
     Wheel { y: i32 },
     Error { path: PathBuf, error: String },
+}
+
+#[derive(Clone, Copy)]
+enum MouseButton {
+    Left,
+    Right,
+    Middle,
+}
+
+impl MouseButton {
+    const fn synergy_code(self) -> u8 {
+        match self {
+            Self::Left => 1,
+            Self::Middle => 2,
+            Self::Right => 3,
+        }
+    }
 }
 
 fn translate_event(
@@ -289,9 +346,10 @@ fn translate_event(
         DeviceKind::Touchpad => match event {
             // Preserve the touchpad's physical left click while using its
             // contact coordinates only for relative pointer movement.
-            EventSummary::Key(_, KeyCode::BTN_LEFT, value @ (0 | 1)) => {
-                Some(InputEvent::Button { down: value == 1 })
-            }
+            EventSummary::Key(_, KeyCode::BTN_LEFT, value @ (0 | 1)) => Some(InputEvent::Button {
+                down: value == 1,
+                button: MouseButton::Left,
+            }),
             _ => touchpad.translate(event),
         },
     }
@@ -326,8 +384,19 @@ impl MouseState {
             EventSummary::RelativeAxis(_, RelativeAxisCode::REL_WHEEL, y) if y != 0 => {
                 Some(InputEvent::Wheel { y })
             }
-            EventSummary::Key(_, KeyCode::BTN_LEFT, value @ (0 | 1)) => {
-                Some(InputEvent::Button { down: value == 1 })
+            EventSummary::Key(_, KeyCode::BTN_LEFT, value @ (0 | 1)) => Some(InputEvent::Button {
+                down: value == 1,
+                button: MouseButton::Left,
+            }),
+            EventSummary::Key(_, KeyCode::BTN_RIGHT, value @ (0 | 1)) => Some(InputEvent::Button {
+                down: value == 1,
+                button: MouseButton::Right,
+            }),
+            EventSummary::Key(_, KeyCode::BTN_MIDDLE, value @ (0 | 1)) => {
+                Some(InputEvent::Button {
+                    down: value == 1,
+                    button: MouseButton::Middle,
+                })
             }
             _ => None,
         }
@@ -549,6 +618,12 @@ impl Pointer {
             width: i32::from(width),
             height: i32::from(height),
         }
+    }
+    fn resize(&mut self, width: i16, height: i16) {
+        self.width = i32::from(width);
+        self.height = i32::from(height);
+        self.x = self.x.clamp(0, self.width - 1);
+        self.y = self.y.clamp(0, self.height - 1);
     }
     fn center(&mut self) {
         self.x = self.width / 2;

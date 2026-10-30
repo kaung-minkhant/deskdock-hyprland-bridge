@@ -1,3 +1,4 @@
+mod android;
 mod bridge;
 mod config;
 mod control;

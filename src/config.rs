@@ -40,6 +40,11 @@ pub struct Tablet {
     pub height: i16,
     #[serde(default = "default_sensitivity")]
     pub sensitivity: i32,
+    /// Refresh Android's current logical size while the bridge is running.
+    #[serde(default)]
+    pub follow_rotation: bool,
+    /// Optional USB ADB serial; omit it when exactly one authorized device is attached.
+    pub adb_serial: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -85,6 +90,11 @@ impl Config {
         if self.tablet.sensitivity <= 0 {
             bail!("{} must use a positive tablet sensitivity", path.display());
         }
+        if let Some(serial) = &self.tablet.adb_serial
+            && serial.trim().is_empty()
+        {
+            bail!("{} has an empty tablet.adb_serial", path.display());
+        }
         if self.devices.is_empty() {
             bail!("{} must configure at least one device", path.display());
         }
@@ -125,6 +135,8 @@ impl Default for Tablet {
             width: default_width(),
             height: default_height(),
             sensitivity: default_sensitivity(),
+            follow_rotation: false,
+            adb_serial: None,
         }
     }
 }
@@ -170,9 +182,13 @@ address = "127.0.0.1"
 port = 24800
 
 [tablet]
+# Set these to the current logical orientation when follow_rotation is false.
 width = 1800
 height = 2880
 sensitivity = 4
+# Use USB ADB to update the pointer bounds after an Android rotation.
+follow_rotation = true
+# adb_serial = "your-usb-device-serial"
 
 [[devices]]
 path = "/dev/input/by-id/usb-YICHIP_Wireless_Device_b120300001-if01-event-mouse"

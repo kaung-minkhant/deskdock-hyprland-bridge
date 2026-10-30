@@ -8,7 +8,7 @@ configured Linux pointers → hypr-android-bridge → DeskDock Server → DeskDo
 
 It does **not** use DeskDock's legacy X11 input capture, emulate its private Android protocol, or replace the Android client.
 
-> **Experimental project.** The current milestone supports configured relative mice plus single-finger touchpad movement, left click, and vertical mouse-wheel events. Keyboard forwarding is not implemented.
+> **Experimental project.** The current milestone supports configured relative mice plus single-finger touchpad movement, left/right/middle mouse buttons, and vertical mouse-wheel events. Keyboard forwarding is not implemented.
 
 ## What works
 
@@ -24,8 +24,9 @@ It does **not** use DeskDock's legacy X11 input capture, emulate its private And
 ## Current limitations
 
 - Touchpad support is initially single-finger relative movement only. Multi-finger gestures, scrolling, tapping, and pinch/zoom are not forwarded.
-- Only movement, left button, and vertical **mouse** wheel are forwarded.
-- Tablet resolution defaults to `1800×2880`; configure it when necessary.
+- Mouse right/middle buttons are forwarded to DeskDock. Configure their Android Back, Home, Menu, and Recent-apps actions in DeskDock's **Mouse button mapping** UI, including its long-press options.
+- Horizontal wheel, touchpad gestures, and extra mouse buttons are not forwarded.
+- Set `tablet.follow_rotation = true` to follow Android portrait/landscape changes over the existing trusted USB ADB connection. Otherwise, configure the current logical orientation manually.
 - Keyboard input always remains local.
 - The current Hyprland binding still invokes the development binary; installing the Nix package and updating the bind is the next operational step.
 
@@ -64,9 +65,14 @@ address = "127.0.0.1"
 port = 24800
 
 [tablet]
+# Fallback when automatic rotation tracking is disabled.
 width = 1800
 height = 2880
 sensitivity = 4
+# Query Android's logical (rotated) bounds through USB ADB every 500 ms.
+follow_rotation = true
+# Optional with exactly one authorized USB device; set it to pin a device.
+# adb_serial = "your-usb-device-serial"
 
 [[devices]]
 path = "/dev/input/by-id/usb-YICHIP_Wireless_Device_b120300001-if01-event-mouse"
@@ -78,6 +84,12 @@ kind = "touchpad"
 ```
 
 Only devices under `[[devices]]` are captured in tablet mode. The wireless mouse and touchpad above both remain under Hyprland in Linux mode, then both feed the same Android pointer in tablet mode.
+
+### Rotation
+
+Set `follow_rotation = true` when the tablet may rotate while forwarding. The bridge uses the existing authorized **USB ADB** connection to read Android's active logical viewport every 500 ms. When it changes, the bridge updates the Synergy screen dimensions and pointer bounds without releasing input or requiring a restart. Specify `adb_serial` when more than one Android device may be attached; obtain it with `adb devices`.
+
+If automatic tracking is disabled, `width` and `height` must match the current logical orientation: this device is `1800×2880` in portrait and `2880×1800` in landscape.
 
 ### Discover stable device paths
 
