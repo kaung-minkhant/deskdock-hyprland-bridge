@@ -16,14 +16,22 @@ const HEALTHY_RUNTIME: Duration = Duration::from_secs(20);
 
 /// Start DeskDock and keep it running until shutdown. The child is stopped when
 /// the bridge exits, and also receives SIGTERM if the bridge is killed.
-pub fn spawn(command: String, shared: Shared) -> Result<JoinHandle<()>> {
+pub fn spawn(command: String, display: String, shared: Shared) -> Result<JoinHandle<()>> {
     // Fail early when the executable cannot be launched at all.
-    let first = launch(&command)?;
-    Ok(thread::spawn(move || supervise(command, first, shared)))
+    let first = launch(&command, &display)?;
+    Ok(thread::spawn(move || {
+        supervise(command, display, first, shared)
+    }))
 }
 
-fn launch(command: &str) -> Result<Child> {
+fn launch(command: &str, display: &str) -> Result<Child> {
     let mut process = Command::new(command);
+    // Keep this identical to the documented DeskDock invocation. Its bundled
+    // Java code needs Xwayland even though DeskDock shows no ordinary window.
+    process
+        .env_remove("JAVA_TOOL_OPTIONS")
+        .env_remove("_JAVA_OPTIONS")
+        .env("DISPLAY", display);
     // SAFETY: prctl is async-signal-safe and allocates nothing.
     unsafe {
         process.pre_exec(|| {
@@ -38,7 +46,7 @@ fn launch(command: &str) -> Result<Child> {
         .with_context(|| format!("Could not start DeskDock using `{command}`"))
 }
 
-fn supervise(command: String, first: Child, shared: Shared) {
+fn supervise(command: String, display: String, first: Child, shared: Shared) {
     let mut child = Some(first);
     let mut delay = MIN_RESTART_DELAY;
     let mut started = Instant::now();
@@ -83,7 +91,7 @@ fn supervise(command: String, first: Child, shared: Shared) {
                 if shared.is_shutdown() {
                     continue;
                 }
-                match launch(&command) {
+                match launch(&command, &display) {
                     Ok(new_child) => {
                         eprintln!("Restarted DeskDock.");
                         child = Some(new_child);

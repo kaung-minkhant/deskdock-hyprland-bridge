@@ -97,6 +97,7 @@ fn run(config: Option<PathBuf>, no_tray: bool) -> Result<()> {
     let supervisor = if config.deskdock.launch {
         Some(supervisor::spawn(
             config.deskdock.command.clone(),
+            config.deskdock.display.clone(),
             shared.clone(),
         )?)
     } else {

@@ -33,6 +33,9 @@ pub struct DeskDock {
     /// Executable used to start DeskDock; resolved through PATH.
     #[serde(default = "default_deskdock_command")]
     pub command: String,
+    /// Xwayland display DeskDock needs for its legacy Java UI integration.
+    #[serde(default = "default_deskdock_display")]
+    pub display: String,
 }
 
 impl Default for DeskDock {
@@ -40,6 +43,7 @@ impl Default for DeskDock {
         Self {
             launch: true,
             command: default_deskdock_command(),
+            display: default_deskdock_display(),
         }
     }
 }
@@ -217,6 +221,8 @@ follow_rotation = true
 # `hypr-android-bridge run` starts and supervises DeskDock for you.
 launch = true
 command = "deskdock"
+# DeskDock's Java server needs Hyprland's Xwayland display.
+display = ":1"
 
 [[devices]]
 path = "/dev/input/by-id/usb-YICHIP_Wireless_Device_b120300001-if01-event-mouse"
@@ -239,6 +245,9 @@ fn default_true() -> bool {
 }
 fn default_deskdock_command() -> String {
     "deskdock".to_owned()
+}
+fn default_deskdock_display() -> String {
+    ":1".to_owned()
 }
 fn default_address() -> String {
     "127.0.0.1".to_owned()
