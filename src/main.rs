@@ -11,7 +11,10 @@ mod tray;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    process::{Command as ProcessCommand, Stdio},
+};
 
 const SYNERGY_PORT: u16 = 24800;
 
@@ -44,12 +47,24 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
-    /// Start everything: DeskDock, the bridge, and a tray icon. Ctrl+C or the tray's Quit stops all.
+
+    /// Start DeskDock, the bridge, and a tray icon. By default this detaches from the terminal.
     Run {
         /// Configuration file path. Defaults to $XDG_CONFIG_HOME/hypr-android-bridge/config.toml.
         #[arg(long)]
         config: Option<PathBuf>,
         /// Do not show a tray icon.
+        #[arg(long)]
+        no_tray: bool,
+        /// Keep the process attached to this terminal and print its diagnostics.
+        #[arg(long)]
+        foreground: bool,
+    },
+    /// Internal foreground process used by `run`; not intended for direct use.
+    #[command(hide = true)]
+    RunForeground {
+        #[arg(long)]
+        config: Option<PathBuf>,
         #[arg(long)]
         no_tray: bool,
     },
@@ -70,12 +85,50 @@ fn main() -> Result<()> {
             let config = config::Config::load(&path)?;
             bridge::run(config, state::Shared::default())
         }
-        Command::Run { config, no_tray } => run(config, no_tray),
+        Command::Run {
+            config,
+            no_tray,
+            foreground,
+        } => {
+            if foreground {
+                run_foreground(config, no_tray)
+            } else {
+                run_background(config, no_tray)
+            }
+        }
+        Command::RunForeground { config, no_tray } => run_foreground(config, no_tray),
         Command::Toggle => control::toggle(),
     }
 }
 
-fn run(config: Option<PathBuf>, no_tray: bool) -> Result<()> {
+/// Replace this short-lived launcher with a detached copy of ourselves. Keeping
+/// the daemon as a child executable (rather than forking Rust threads) gives it
+/// its own Ctrl+C handler and preserves the Wayland/D-Bus session environment.
+fn run_background(config: Option<PathBuf>, no_tray: bool) -> Result<()> {
+    let executable = std::env::current_exe().context("Could not find the bridge executable")?;
+    let mut command = ProcessCommand::new(executable);
+    command
+        .arg("run-foreground")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(path) = config {
+        command.arg("--config").arg(path);
+    }
+    if no_tray {
+        command.arg("--no-tray");
+    }
+    let child = command
+        .spawn()
+        .context("Could not start the bridge in the background")?;
+    println!(
+        "Started DeskDock bridge (PID {}). Use the Waybar tray icon to control it.",
+        child.id()
+    );
+    Ok(())
+}
+
+fn run_foreground(config: Option<PathBuf>, no_tray: bool) -> Result<()> {
     let path = config.map(Ok).unwrap_or_else(config::default_path)?;
     let config = config::Config::load(&path)?;
     let shared = state::Shared::default();

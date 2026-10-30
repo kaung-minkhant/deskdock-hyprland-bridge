@@ -140,6 +140,8 @@ It enables Synergy/Barrier, configures `127.0.0.1:24800`, and disables Synergy e
 hypr-android-bridge run
 ```
 
+The command starts the service in the background and returns to the shell. Use the tray icon to control or quit it. For live diagnostics while developing, use `hypr-android-bridge run --foreground`.
+
 This single command:
 
 1. points DeskDock at the bridge (the same change as `enable-synergy`, if DeskDock's preferences exist),
