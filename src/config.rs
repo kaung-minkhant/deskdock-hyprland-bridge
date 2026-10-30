@@ -54,11 +54,12 @@ pub struct Device {
     pub kind: DeviceKind,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DeviceKind {
     Mouse,
     Touchpad,
+    Keyboard,
 }
 
 impl Config {
@@ -197,6 +198,12 @@ kind = "mouse"
 [[devices]]
 path = "/dev/input/by-path/pci-0000:00:15.0-platform-i2c_designware.0-event-mouse"
 kind = "touchpad"
+
+# Optional: forward a keyboard to Android while in tablet mode. The keyboard is
+# grabbed exclusively, so press Super+Shift+T to return to Linux mode.
+# [[devices]]
+# path = "/dev/input/by-id/usb-Your_Keyboard-event-kbd"
+# kind = "keyboard"
 "#
 }
 

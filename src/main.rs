@@ -3,6 +3,7 @@ mod bridge;
 mod config;
 mod control;
 mod deskdock;
+mod keyboard;
 mod synergy;
 
 use anyhow::Result;

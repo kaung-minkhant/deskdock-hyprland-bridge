@@ -1,14 +1,14 @@
 # DeskDock Wayland bridge
 
-A **mouse and touchpad** bridge for the existing [DeskDock](https://desk-dock.com/) Android client. It reads only the Linux pointer devices you explicitly configure and uses DeskDock Server's supported **Synergy/Barrier** integration over localhost.
+A **mouse, touchpad, and keyboard** bridge for the existing [DeskDock](https://desk-dock.com/) Android client. It reads only the Linux input devices you explicitly configure and uses DeskDock Server's supported **Synergy/Barrier** integration over localhost.
 
 ```text
-configured Linux pointers → hypr-android-bridge → DeskDock Server → DeskDock Android app
+configured Linux input devices → hypr-android-bridge → DeskDock Server → DeskDock Android app
 ```
 
 It does **not** use DeskDock's legacy X11 input capture, emulate its private Android protocol, or replace the Android client.
 
-> **Experimental project.** The current milestone supports configured relative mice plus single-finger touchpad movement, left/right/middle mouse buttons, and vertical mouse-wheel events. Keyboard forwarding is not implemented.
+> **Experimental project.** The current milestone supports configured relative mice plus single-finger touchpad movement, left/right/middle mouse buttons, and vertical mouse-wheel events, plus optional keyboard forwarding (US layout, core keys).
 
 ## What works
 
@@ -27,7 +27,10 @@ It does **not** use DeskDock's legacy X11 input capture, emulate its private And
 - Mouse right/middle buttons are forwarded to DeskDock. Configure their Android Back, Home, Menu, and Recent-apps actions in DeskDock's **Mouse button mapping** UI, including its long-press options.
 - Horizontal wheel, touchpad gestures, and extra mouse buttons are not forwarded.
 - Set `tablet.follow_rotation = true` to follow Android portrait/landscape changes over the existing trusted USB ADB connection. Otherwise, configure the current logical orientation manually.
-- Keyboard input always remains local.
+- Keyboard forwarding is opt-in: a keyboard is forwarded only if it is listed with `kind = "keyboard"`. Otherwise it stays local.
+- Keyboard forwarding assumes a **US layout** on the Linux side. Keys are sent as characters, so the Android keyboard layout decides the rest.
+- Supported keys: letters, digits, punctuation, Enter/Backspace/Tab/Esc, arrows, Home/End/PgUp/PgDn, Insert/Delete, F1–F12, keypad, and modifiers. Media, volume, and brightness keys are not forwarded.
+- Key repeat is left to Android; Linux auto-repeat events are ignored.
 - The current Hyprland binding still invokes the development binary; installing the Nix package and updating the bind is the next operational step.
 
 ## Prerequisites
@@ -84,6 +87,20 @@ kind = "touchpad"
 ```
 
 Only devices under `[[devices]]` are captured in tablet mode. The wireless mouse and touchpad above both remain under Hyprland in Linux mode, then both feed the same Android pointer in tablet mode.
+
+### Keyboard
+
+To forward a keyboard, add it as another device. Find its stable path with `list-devices` (keyboards usually end in `-event-kbd`):
+
+```toml
+[[devices]]
+path = "/dev/input/by-id/usb-Your_Keyboard-event-kbd"
+kind = "keyboard"
+```
+
+In tablet mode the keyboard is grabbed exclusively, so Hyprland no longer sees it. **Super + Shift + T** is therefore also detected by the bridge itself: it releases every key on Android and switches back to Linux mode. Don't list your laptop's built-in keyboard unless you have another way to reach the control socket (for example an SSH session running `toggle`).
+
+When you toggle into tablet mode with the shortcut, the keyboard is grabbed only after every key is released, so Hyprland never sees a stuck Super or Shift.
 
 ### Rotation
 
@@ -166,7 +183,7 @@ nix run . -- toggle
 - First invocation requests **tablet mode**. Every configured pointer is exclusively captured, and the Android pointer resets to the center.
 - Invoke it again for **Linux mode**. Every configured pointer is released to Hyprland and the Android cursor is hidden.
 
-The active development shortcut is **Super + Shift + T**. The keyboard remains local, so it is a reliable way to return configured pointers to Linux.
+The active development shortcut is **Super + Shift + T**. If no keyboard is configured, the keyboard stays local and this shortcut always works. If a keyboard is configured, the bridge handles the same shortcut itself while that keyboard is grabbed.
 
 ## Recovery behavior
 
@@ -200,6 +217,7 @@ nix develop --command cargo clippy -- -D warnings
 - `src/main.rs` — command-line interface.
 - `src/config.rs` — TOML configuration, validation, and template generation.
 - `src/bridge.rs` — configured input workers, exclusive capture, touchpad translation, reconnect handling, and pointer state.
+- `src/keyboard.rs` — evdev-to-Synergy key mapping, held-key tracking, and the Super+Shift+T escape chord.
 - `src/synergy.rs` — minimal Synergy/Barrier framing used by DeskDock.
 - `src/control.rs` — local Unix-socket toggle interface.
 - `src/deskdock.rs` — DeskDock localhost Synergy preference configuration.

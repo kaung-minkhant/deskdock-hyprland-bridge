@@ -125,6 +125,22 @@ pub fn mouse_button(down: bool, button: u8) -> Vec<u8> {
     packet
 }
 
+pub fn key_down(id: u16, mask: u16, button: u16) -> Vec<u8> {
+    key_packet(b"DKDN", id, mask, button)
+}
+
+pub fn key_up(id: u16, mask: u16, button: u16) -> Vec<u8> {
+    key_packet(b"DKUP", id, mask, button)
+}
+
+fn key_packet(kind: &[u8; 4], id: u16, mask: u16, button: u16) -> Vec<u8> {
+    let mut packet = kind.to_vec();
+    for value in [id, mask, button] {
+        packet.extend_from_slice(&value.to_be_bytes());
+    }
+    packet
+}
+
 pub fn mouse_wheel(x: i16, y: i16) -> Vec<u8> {
     let mut packet = b"DMWM".to_vec();
     packet.extend_from_slice(&x.to_be_bytes());

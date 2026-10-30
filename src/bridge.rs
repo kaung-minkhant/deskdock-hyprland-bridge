@@ -2,6 +2,7 @@ use crate::{
     android::{self, DisplaySize},
     config::{Config, Device as ConfiguredDevice, DeviceKind},
     control::ControlSocket,
+    keyboard::{KeyAction, KeyboardState},
     synergy,
 };
 use anyhow::{Context, Result, bail};
@@ -27,24 +28,24 @@ const ROTATION_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
 pub fn list_devices() -> Result<()> {
     let mut devices: Vec<_> = evdev::enumerate()
-        .filter(|(_, device)| is_pointer_device(device))
+        .filter(|(_, device)| is_supported_device(device))
         .collect();
     devices.sort_by(|(left, _), (right, _)| left.cmp(right));
     if devices.is_empty() {
         bail!(
-            "No readable pointer devices found. Check access to /dev/input/event* and try `newgrp input` if needed."
+            "No readable input devices found. Check access to /dev/input/event* and try `newgrp input` if needed."
         );
     }
 
-    println!("Pointer-capable evdev devices:");
+    println!("Supported evdev devices (kind = \"mouse\", \"touchpad\", or \"keyboard\"):");
     for (path, device) in devices {
         println!(
             "\n{} ({})",
             device.name().unwrap_or("<unnamed>"),
-            pointer_kind(&device)
+            device_kind_label(&device)
         );
         println!("  current: {}", path.display());
-        match stable_pointer_path(&path) {
+        match stable_device_path(&path) {
             Some(stable_path) => println!("  stable:  {}", stable_path.display()),
             None => println!("  stable:  no /dev/input/by-id or /dev/input/by-path alias found"),
         }
@@ -67,9 +68,16 @@ pub fn run(config: Config) -> Result<()> {
     }
     drop(events);
 
-    eprintln!("Linux mode: configured pointers remain with Hyprland until tablet mode is toggled.");
+    eprintln!("Linux mode: configured devices remain with Hyprland until tablet mode is toggled.");
     for path in &configured_paths {
-        eprintln!("Configured pointer: {}", path.display());
+        eprintln!("Configured device: {}", path.display());
+    }
+    if config
+        .devices
+        .iter()
+        .any(|device| matches!(device.kind, DeviceKind::Keyboard))
+    {
+        eprintln!("Keyboard forwarding enabled: press Super+Shift+T to return to Linux mode.");
     }
 
     let control_socket = ControlSocket::bind(Arc::clone(&tablet_mode))?;
@@ -123,7 +131,21 @@ fn spawn_input_worker(
         let mut mouse = MouseState::default();
         let mut touchpad = TouchpadState::new(&device);
         loop {
-            let should_grab = tablet_mode.load(Ordering::SeqCst);
+            let mut should_grab = tablet_mode.load(Ordering::SeqCst);
+            // The tablet-mode shortcut (Super+Shift+T) is still held when the
+            // toggle arrives. Grabbing now would hide the key releases from
+            // Hyprland and leave its modifiers stuck, so a keyboard waits until
+            // every key is up before it is captured.
+            if should_grab
+                && !grabbed
+                && kind == DeviceKind::Keyboard
+                && device
+                    .get_key_state()
+                    .map(|keys| keys.iter().next().is_some())
+                    .unwrap_or(false)
+            {
+                should_grab = false;
+            }
             if should_grab != grabbed {
                 let result = if should_grab {
                     device.grab()
@@ -162,6 +184,11 @@ fn spawn_input_worker(
             };
             for event in events {
                 if !tablet_mode.load(Ordering::SeqCst) {
+                    continue;
+                }
+                // A keyboard must never reach both machines: forward only
+                // while it is actually grabbed away from Hyprland.
+                if kind == DeviceKind::Keyboard && !grabbed {
                     continue;
                 }
                 if let Some(event) =
@@ -208,6 +235,7 @@ fn run_session(
     let mut display_size = display_size;
     let mut pointer = Pointer::centered(display_size.width, display_size.height);
     let mut tablet_active = false;
+    let mut keyboard = KeyboardState::default();
     let mut last_rotation_check = std::time::Instant::now() - ROTATION_CHECK_INTERVAL;
     loop {
         if config.tablet.follow_rotation && last_rotation_check.elapsed() >= ROTATION_CHECK_INTERVAL
@@ -248,8 +276,10 @@ fn run_session(
                     "Tablet mode: all configured pointers are captured; Android pointer reset to center."
                 );
             } else {
+                // Never leave a key or modifier stuck down on Android.
+                keyboard.release_all(&mut stream)?;
                 synergy::send_frame(&mut stream, synergy::client_leave())?;
-                eprintln!("Linux mode: all configured pointers were released to Hyprland.");
+                eprintln!("Linux mode: all configured devices were released to Hyprland.");
             }
             tablet_active = active;
         }
@@ -260,8 +290,9 @@ fn run_session(
                 handle_input_event(
                     &mut stream,
                     &mut pointer,
+                    &mut keyboard,
                     config.tablet.sensitivity,
-                    tablet_mode.load(Ordering::SeqCst),
+                    tablet_mode,
                     event,
                 )?;
                 // Drain any already queued input frames. This prevents a busy
@@ -270,8 +301,9 @@ fn run_session(
                     handle_input_event(
                         &mut stream,
                         &mut pointer,
+                        &mut keyboard,
                         config.tablet.sensitivity,
-                        tablet_mode.load(Ordering::SeqCst),
+                        tablet_mode,
                         event,
                     )?;
                 }
@@ -285,11 +317,19 @@ fn run_session(
 fn handle_input_event(
     stream: &mut TcpStream,
     pointer: &mut Pointer,
+    keyboard: &mut KeyboardState,
     sensitivity: i32,
-    tablet_active: bool,
+    tablet_mode: &AtomicBool,
     event: InputEvent,
 ) -> Result<()> {
+    let tablet_active = tablet_mode.load(Ordering::SeqCst);
     match event {
+        InputEvent::Key { code, down } if tablet_active => {
+            if keyboard.handle(stream, code, down)? == KeyAction::ReturnToLinux {
+                // The session loop sees the flag change and sends COUT.
+                tablet_mode.store(false, Ordering::SeqCst);
+            }
+        }
         InputEvent::Motion { x, y } if tablet_active => {
             pointer.move_by(x * sensitivity, y * sensitivity);
             synergy::send_frame(
@@ -315,6 +355,7 @@ enum InputEvent {
     Motion { x: i32, y: i32 },
     Button { down: bool, button: MouseButton },
     Wheel { y: i32 },
+    Key { code: KeyCode, down: bool },
     Error { path: PathBuf, error: String },
 }
 
@@ -343,6 +384,14 @@ fn translate_event(
 ) -> Option<InputEvent> {
     match kind {
         DeviceKind::Mouse => mouse.translate(event),
+        DeviceKind::Keyboard => match event {
+            // Ignore auto-repeat (value 2); Android generates its own.
+            EventSummary::Key(_, code, value @ (0 | 1)) => Some(InputEvent::Key {
+                code,
+                down: value == 1,
+            }),
+            _ => None,
+        },
         DeviceKind::Touchpad => match event {
             // Preserve the touchpad's physical left click while using its
             // contact coordinates only for relative pointer movement.
@@ -544,6 +593,7 @@ fn validate_device(device: &Device, configured: &ConfiguredDevice) -> Result<()>
     let matches = match configured.kind {
         DeviceKind::Mouse => is_relative_mouse(device),
         DeviceKind::Touchpad => is_touchpad(device),
+        DeviceKind::Keyboard => is_keyboard(device),
     };
     if matches {
         Ok(())
@@ -554,13 +604,29 @@ fn validate_device(device: &Device, configured: &ConfiguredDevice) -> Result<()>
             match configured.kind {
                 DeviceKind::Mouse => "relative mouse",
                 DeviceKind::Touchpad => "touchpad",
+                DeviceKind::Keyboard => "keyboard",
             }
         )
     }
 }
 
-fn is_pointer_device(device: &Device) -> bool {
-    is_relative_mouse(device) || is_touchpad(device)
+fn is_supported_device(device: &Device) -> bool {
+    is_relative_mouse(device) || is_touchpad(device) || is_keyboard(device)
+}
+fn is_keyboard(device: &Device) -> bool {
+    // Require ordinary typing keys so power buttons, lid switches, and
+    // media-only HID interfaces are not mistaken for keyboards.
+    !is_relative_mouse(device)
+        && device.supported_keys().is_some_and(|keys| {
+            [
+                KeyCode::KEY_A,
+                KeyCode::KEY_Z,
+                KeyCode::KEY_ENTER,
+                KeyCode::KEY_SPACE,
+            ]
+            .iter()
+            .all(|key| keys.contains(*key))
+        })
 }
 fn is_relative_mouse(device: &Device) -> bool {
     device.supported_relative_axes().is_some_and(|axes| {
@@ -577,22 +643,27 @@ fn is_touchpad(device: &Device) -> bool {
         .supported_keys()
         .is_some_and(|keys| keys.contains(KeyCode::BTN_TOUCH))
 }
-fn pointer_kind(device: &Device) -> &'static str {
+fn device_kind_label(device: &Device) -> &'static str {
     if is_relative_mouse(device) {
-        "relative mouse"
-    } else {
+        "mouse"
+    } else if is_touchpad(device) {
         "touchpad"
+    } else {
+        "keyboard"
     }
 }
 
-fn stable_pointer_path(event_path: &Path) -> Option<PathBuf> {
+fn stable_device_path(event_path: &Path) -> Option<PathBuf> {
     let event_target = fs::canonicalize(event_path).ok()?;
     for directory in ["/dev/input/by-id", "/dev/input/by-path"] {
         let mut aliases = fs::read_dir(directory)
             .ok()?
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.path())
-            .filter(|path| path.to_string_lossy().ends_with("-event-mouse"))
+            .filter(|path| {
+                let name = path.to_string_lossy();
+                name.ends_with("-event-mouse") || name.ends_with("-event-kbd")
+            })
             .filter(|path| fs::canonicalize(path).ok().as_ref() == Some(&event_target))
             .collect::<Vec<_>>();
         aliases.sort();
