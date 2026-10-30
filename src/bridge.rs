@@ -59,6 +59,7 @@ pub fn list_devices() -> Result<()> {
 
 pub fn run(config: Config, shared: Shared) -> Result<()> {
     let tablet_mode = Arc::clone(&shared.tablet_mode);
+    let connected = Arc::clone(&shared.connected);
     let (events, event_receiver) = mpsc::channel();
     let configured_paths = config
         .devices
@@ -67,7 +68,12 @@ pub fn run(config: Config, shared: Shared) -> Result<()> {
         .collect::<Vec<_>>();
 
     for device in config.devices.iter().cloned() {
-        spawn_input_worker(device, Arc::clone(&tablet_mode), events.clone())?;
+        spawn_input_worker(
+            device,
+            Arc::clone(&tablet_mode),
+            Arc::clone(&connected),
+            events.clone(),
+        )?;
     }
     drop(events);
 
@@ -83,7 +89,7 @@ pub fn run(config: Config, shared: Shared) -> Result<()> {
         eprintln!("Keyboard forwarding enabled: press Super+Shift+T to return to Linux mode.");
     }
 
-    let control_socket = ControlSocket::bind(Arc::clone(&tablet_mode))?;
+    let control_socket = ControlSocket::bind(shared.clone())?;
     eprintln!("Control socket: {}", control_socket.path().display());
 
     let listener = TcpListener::bind((config.synergy.address.as_str(), config.synergy.port))
@@ -156,6 +162,7 @@ fn spawn_rotation_worker(serial: Option<String>, stop: Arc<AtomicBool>) -> Rotat
 fn spawn_input_worker(
     configured: ConfiguredDevice,
     tablet_mode: Arc<AtomicBool>,
+    connected: Arc<AtomicBool>,
     sender: mpsc::Sender<InputEvent>,
 ) -> Result<()> {
     let mut device = Device::open(&configured.path).with_context(|| {
@@ -176,7 +183,8 @@ fn spawn_input_worker(
         let mut mouse = MouseState::default();
         let mut touchpad = TouchpadState::new(&device);
         loop {
-            let mut should_grab = tablet_mode.load(Ordering::SeqCst);
+            let mut should_grab =
+                tablet_mode.load(Ordering::SeqCst) && connected.load(Ordering::SeqCst);
             // The tablet-mode shortcut (Super+Shift+T) is still held when the
             // toggle arrives. Grabbing now would hide the key releases from
             // Hyprland and leave its modifiers stuck, so a keyboard waits until
@@ -289,6 +297,10 @@ fn run_session(
         &synergy::client_enter(display_size.width, display_size.height),
     )?;
     stream.set_nonblocking(true)?;
+    // Every new DeskDock session starts in Linux mode. This also prevents a
+    // stale or racing tablet-mode request made while disconnected from taking
+    // effect when DeskDock reconnects.
+    tablet_mode.store(false, Ordering::SeqCst);
     shared.connected.store(true, Ordering::SeqCst);
     eprintln!("DeskDock Synergy session active.");
 

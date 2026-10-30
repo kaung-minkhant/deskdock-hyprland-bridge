@@ -1,13 +1,10 @@
+use crate::state::{Shared, TabletModeChange};
 use anyhow::{Context, Result, bail};
 use std::{
     fs,
     io::{Read, Write},
     os::unix::net::{UnixListener, UnixStream},
     path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
     thread,
 };
 
@@ -18,7 +15,7 @@ pub struct ControlSocket {
 }
 
 impl ControlSocket {
-    pub fn bind(tablet_mode: Arc<AtomicBool>) -> Result<Self> {
+    pub fn bind(shared: Shared) -> Result<Self> {
         let path = socket_path()?;
         if path.exists() {
             match UnixStream::connect(&path) {
@@ -43,10 +40,10 @@ impl ControlSocket {
                 let response = if connection.read_to_string(&mut command).is_ok()
                     && command.trim() == "toggle"
                 {
-                    if !tablet_mode.fetch_xor(true, Ordering::SeqCst) {
-                        "tablet\n"
-                    } else {
-                        "linux\n"
+                    match shared.toggle_tablet_mode() {
+                        TabletModeChange::Tablet => "tablet\n",
+                        TabletModeChange::Linux => "linux\n",
+                        TabletModeChange::Unavailable => "unavailable\n",
                     }
                 } else {
                     "error\n"
@@ -85,6 +82,7 @@ pub fn toggle() -> Result<()> {
     match response.trim() {
         "tablet" => println!("Tablet mode requested."),
         "linux" => println!("Linux mode requested."),
+        "unavailable" => bail!("DeskDock is not connected; input remains on Linux."),
         _ => bail!("Bridge rejected the toggle request: {}", response.trim()),
     }
     Ok(())

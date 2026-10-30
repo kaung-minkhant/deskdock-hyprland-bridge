@@ -178,8 +178,9 @@ From another terminal in the same graphical session:
 hypr-android-bridge toggle
 ```
 
-- First invocation requests **tablet mode**. Every configured pointer is exclusively captured, and the Android pointer resets to the center.
+- When DeskDock is connected, the first invocation requests **tablet mode**. Every configured pointer is exclusively captured, and the Android pointer resets to the center.
 - Invoke it again for **Linux mode**. Every configured pointer is released to Hyprland and the Android cursor is hidden.
+- While DeskDock is waiting to connect, the command leaves input in Linux mode and reports that DeskDock is unavailable.
 
 The active development shortcut is **Super + Shift + T**. If no keyboard is configured, the keyboard stays local and this shortcut always works. If a keyboard is configured, the bridge handles the same shortcut itself while that keyboard is grabbed.
 
