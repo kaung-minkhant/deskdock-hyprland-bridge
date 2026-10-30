@@ -1,5 +1,5 @@
 {
-  description = "Development shell for a Hyprland-to-Android input bridge";
+  description = "Hyprland mouse bridge for DeskDock's Synergy/Barrier integration";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -8,6 +8,33 @@
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
     in {
+      packages = forAllSystems (system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+          hypr-android-bridge = pkgs.rustPlatform.buildRustPackage {
+            pname = "hypr-android-bridge";
+            version = "0.1.0";
+            src = ./.;
+            cargoLock.lockFile = ./Cargo.lock;
+            meta = {
+              description = "Hyprland mouse bridge for DeskDock's Synergy/Barrier integration";
+              license = pkgs.lib.licenses.mit;
+              mainProgram = "hypr-android-bridge";
+              platforms = pkgs.lib.platforms.linux;
+            };
+          };
+        in {
+          default = hypr-android-bridge;
+          inherit hypr-android-bridge;
+        });
+
+      apps = forAllSystems (system: {
+        default = {
+          type = "app";
+          program = "${self.packages.${system}.default}/bin/hypr-android-bridge";
+        };
+      });
+
       devShells = forAllSystems (system:
         let pkgs = import nixpkgs { inherit system; };
         in {

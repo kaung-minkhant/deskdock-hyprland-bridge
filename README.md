@@ -15,7 +15,7 @@ It does **not** use DeskDock's legacy X11 input capture, emulate its private And
 - Native Android mouse cursor through DeskDock's Synergy/Barrier integration.
 - Safe Linux/tablet mouse handoff through a local control socket.
 - `Super + Shift + T` toggles the running bridge in the current development setup.
-- Android pointer is recentered on every entry to tablet mode.
+- Android pointer is recentered on every entry to tablet mode and hidden when returning to Linux mode.
 - DeskDock disconnect/crash releases the captured mouse and restores Linux mode.
 - Restarting DeskDock reconnects without restarting the bridge.
 - The Synergy listener is bound only to `127.0.0.1`.
@@ -149,12 +149,29 @@ With DeskDock stopped, set this entry in `~/.java/.userPrefs/<unnamed>/prefs.xml
 
 Then start DeskDock normally.
 
+## Build and run with Nix
+
+The flake exposes the bridge as its default package and app:
+
+```bash
+nix build
+./result/bin/hypr-android-bridge --help
+
+# Equivalent to the development-shell cargo command:
+nix run . -- forward --device /dev/input/event6
+```
+
+`nix run` provides the executable but does not grant access to raw input. Run it
+from a login session where your user is already in the `input` group (or use
+`newgrp input` for the current shell until the next graphical login).
+
 ## Development checks
 
 ```bash
 nix develop --command cargo fmt --check
 nix develop --command cargo check
 nix develop --command cargo clippy -- -D warnings
+nix flake check
 ```
 
 ## Project layout

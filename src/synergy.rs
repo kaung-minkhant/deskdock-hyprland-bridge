@@ -102,6 +102,12 @@ pub fn client_enter(width: i16, height: i16) -> Vec<u8> {
     packet
 }
 
+/// Tell the Synergy client that the pointer has left its screen. DeskDock uses
+/// this to hide Android's cursor when Linux regains the selected mouse.
+pub fn client_leave() -> &'static [u8] {
+    b"COUT"
+}
+
 pub fn mouse_move(x: i16, y: i16) -> Vec<u8> {
     let mut packet = b"DMMV".to_vec();
     packet.extend_from_slice(&x.to_be_bytes());

@@ -124,6 +124,10 @@ fn run_session(
                     path.display()
                 );
             } else {
+                // DeskDock keeps its Android cursor visible until Synergy says
+                // the pointer left its screen. Send COUT before returning the
+                // physical mouse to Hyprland.
+                synergy::send_frame(&mut stream, synergy::client_leave())?;
                 device.ungrab().with_context(|| {
                     format!("Could not release {} back to Linux", path.display())
                 })?;
