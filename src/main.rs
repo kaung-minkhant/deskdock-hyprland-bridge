@@ -1,9 +1,10 @@
 mod bridge;
+mod config;
 mod control;
 mod deskdock;
 mod synergy;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -26,19 +27,19 @@ enum Command {
         #[arg(long, default_value = "127.0.0.1")]
         address: String,
     },
-    /// Run the mouse bridge and wait for DeskDock to connect.
-    Forward {
-        /// Relative-pointer evdev device to control.
+    /// Create the default configuration template without overwriting an existing file.
+    InitConfig {
+        /// Optional configuration file path. Defaults to $XDG_CONFIG_HOME/hypr-android-bridge/config.toml.
         #[arg(long)]
-        device: PathBuf,
-        /// Local Synergy/Barrier port for DeskDock to connect to.
-        #[arg(long, default_value_t = SYNERGY_PORT)]
-        port: u16,
-        /// Android pixels per relative mouse unit.
-        #[arg(long, default_value_t = 4)]
-        sensitivity: i32,
+        config: Option<PathBuf>,
     },
-    /// Toggle a running bridge between Linux and exclusive tablet mouse mode.
+    /// Run the configured bridge and wait for DeskDock to connect.
+    Forward {
+        /// Configuration file path. Defaults to $XDG_CONFIG_HOME/hypr-android-bridge/config.toml.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Toggle a running bridge between Linux and exclusive tablet pointer mode.
     Toggle,
 }
 
@@ -46,15 +47,14 @@ fn main() -> Result<()> {
     match Cli::parse().command {
         Command::ListDevices => bridge::list_devices(),
         Command::EnableSynergy { address } => deskdock::enable_synergy(&address, SYNERGY_PORT),
-        Command::Forward {
-            device,
-            port,
-            sensitivity,
-        } => {
-            if sensitivity <= 0 {
-                bail!("--sensitivity must be a positive number");
-            }
-            bridge::run(&device, port, sensitivity)
+        Command::InitConfig { config } => {
+            let path = config.map(Ok).unwrap_or_else(config::default_path)?;
+            config::initialize(&path)
+        }
+        Command::Forward { config } => {
+            let path = config.map(Ok).unwrap_or_else(config::default_path)?;
+            let config = config::Config::load(&path)?;
+            bridge::run(config)
         }
         Command::Toggle => control::toggle(),
     }
