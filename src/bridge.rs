@@ -7,7 +7,9 @@ use crate::{
     synergy,
 };
 use anyhow::{Context, Result, bail};
-use evdev::{AbsoluteAxisCode, Device, EventSummary, KeyCode, RelativeAxisCode};
+use evdev::{
+    AbsoluteAxisCode, Device, EventSummary, KeyCode, RelativeAxisCode, SynchronizationCode,
+};
 use std::{
     fs,
     net::{TcpListener, TcpStream},
@@ -178,6 +180,13 @@ fn spawn_input_worker(
                     return;
                 }
                 grabbed = should_grab;
+                // Events were deliberately ignored in Linux mode, so their
+                // absolute coordinates cannot be compared with the first
+                // Android-mode contact. Start that contact with a fresh
+                // baseline to prevent a one-frame cursor jump.
+                if grabbed && kind == DeviceKind::Touchpad {
+                    touchpad.reset_motion();
+                }
             }
 
             let events = match device.fetch_events() {
@@ -443,7 +452,14 @@ impl MouseState {
                 self.pending_y += y;
                 None
             }
-            EventSummary::Synchronization(_, _, _)
+            // A dropped event means relative movement is incomplete; discard
+            // it rather than turning an invalid frame boundary into a jump.
+            EventSummary::Synchronization(_, SynchronizationCode::SYN_DROPPED, _) => {
+                self.pending_x = 0;
+                self.pending_y = 0;
+                None
+            }
+            EventSummary::Synchronization(_, SynchronizationCode::SYN_REPORT, _)
                 if self.pending_x != 0 || self.pending_y != 0 =>
             {
                 let event = InputEvent::Motion {
@@ -575,7 +591,14 @@ impl TouchpadState {
                 self.current_y = Some(value);
                 None
             }
-            EventSummary::Synchronization(_, _, _)
+            // `fetch_events` does not repair state after SYN_DROPPED. Forget
+            // the old baseline so its next complete report only establishes a
+            // position; never infer motion across lost input events.
+            EventSummary::Synchronization(_, SynchronizationCode::SYN_DROPPED, _) => {
+                self.reset_motion();
+                None
+            }
+            EventSummary::Synchronization(_, SynchronizationCode::SYN_REPORT, _)
                 if self.primary_tracking && self.finger_count == 1 =>
             {
                 let (x, y) = (self.current_x?, self.current_y?);
