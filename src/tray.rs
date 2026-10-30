@@ -101,7 +101,7 @@ impl ksni::Tray for BridgeTray {
                 .into(),
                 enabled: connected,
                 activate: Box::new(|this: &mut Self| {
-                    this.shared.tablet_mode.fetch_xor(true, Ordering::SeqCst);
+                    let _ = this.shared.toggle_tablet_mode();
                 }),
                 ..Default::default()
             }
