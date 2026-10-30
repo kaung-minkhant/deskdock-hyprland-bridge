@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use evdev::{Device, EventSummary, KeyCode};
+use evdev::{Device, EventSummary, KeyCode, RelativeAxisCode};
 use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -23,10 +23,10 @@ enum CommandKind {
         #[arg(long)]
         serial: Option<String>,
     },
-    /// Forward events from one evdev device to Android until Ctrl+C.
+    /// Forward one relative-pointer device to Android until Ctrl+C.
     ///
-    /// This is deliberately a single-device, no-grab diagnostic mode. It does
-    /// not yet take exclusive control of your mouse or keyboard.
+    /// This is deliberately a single-device prototype. It does not grab the
+    /// mouse unless --grab is explicitly provided.
     Forward {
         /// /dev/input/eventN device to monitor.
         #[arg(long)]
@@ -38,6 +38,21 @@ enum CommandKind {
         /// non-grabbing mode works and keep a separate recovery path ready.
         #[arg(long)]
         grab: bool,
+        /// Android pixels to move per one relative mouse unit.
+        #[arg(long, default_value_t = 4)]
+        sensitivity: i32,
+    },
+    /// Send one Android touchscreen swipe, for verifying pointer delivery.
+    TestSwipe {
+        /// Device serial from `adb devices`.
+        #[arg(long)]
+        serial: Option<String>,
+    },
+    /// Send an Android left-click/tap at the center of the display.
+    TestTap {
+        /// Device serial from `adb devices`.
+        #[arg(long)]
+        serial: Option<String>,
     },
 }
 
@@ -49,7 +64,10 @@ fn main() -> Result<()> {
             device,
             serial,
             grab,
-        } => forward(&device, serial.as_deref(), grab),
+            sensitivity,
+        } => forward(&device, serial.as_deref(), grab, sensitivity),
+        CommandKind::TestSwipe { serial } => test_swipe(serial.as_deref()),
+        CommandKind::TestTap { serial } => test_tap(serial.as_deref()),
     }
 }
 
@@ -94,7 +112,11 @@ fn check_adb(serial: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn forward(path: &Path, serial: Option<&str>, grab: bool) -> Result<()> {
+fn forward(path: &Path, serial: Option<&str>, grab: bool, sensitivity: i32) -> Result<()> {
+    if sensitivity <= 0 {
+        bail!("--sensitivity must be a positive number");
+    }
+
     let mut device =
         Device::open(path).with_context(|| format!("Could not open {}", path.display()))?;
     println!(
@@ -111,31 +133,88 @@ fn forward(path: &Path, serial: Option<&str>, grab: bool) -> Result<()> {
             )
         })?;
         eprintln!("WARNING: device is exclusively grabbed. Press Ctrl+C to release it.");
+    } else {
+        eprintln!("Read-only mode: Hyprland will still receive this mouse's input.");
     }
 
-    let tablet_size = tablet_size(serial)?;
-    eprintln!("Android display: {}x{}", tablet_size.0, tablet_size.1);
-    eprintln!("Diagnostic mapping only: relative movement becomes a short touchscreen swipe.");
+    let (width, height) = tablet_size(serial)?;
+    let mut pointer = Pointer::centered(width, height);
+    let mut pending_x = 0;
+    let mut pending_y = 0;
+    eprintln!("Android display: {width}x{height}; virtual pointer begins at its center.");
+    eprintln!("Press Ctrl+C to stop. Use --grab only after validating forwarding.");
 
-    for event in device
-        .fetch_events()
-        .context("Could not read input events")?
-    {
-        match event.destructure() {
-            EventSummary::RelativeAxis(_, axis, value) => {
-                eprintln!("relative {axis:?}: {value}");
-            }
-            EventSummary::Key(_, key, value) if value == 1 => {
-                eprintln!("key pressed: {key:?}");
-                if key == KeyCode::KEY_ESC {
-                    send_key(serial, "KEYCODE_BACK")?;
+    loop {
+        // `fetch_events()` yields the currently buffered frame, then its
+        // iterator ends. Keep fetching frames instead of exiting after the
+        // first one.
+        for event in device
+            .fetch_events()
+            .context("Could not read input events")?
+        {
+            match event.destructure() {
+                EventSummary::RelativeAxis(_, RelativeAxisCode::REL_X, value) => pending_x += value,
+                EventSummary::RelativeAxis(_, RelativeAxisCode::REL_Y, value) => pending_y += value,
+                EventSummary::Synchronization(_, _, _) if pending_x != 0 || pending_y != 0 => {
+                    pointer.move_by(pending_x * sensitivity, pending_y * sensitivity);
+                    send_move(serial, pointer.x, pointer.y)?;
+                    pending_x = 0;
+                    pending_y = 0;
                 }
+                EventSummary::RelativeAxis(_, RelativeAxisCode::REL_WHEEL, value) => {
+                    send_scroll(serial, value)?;
+                }
+                EventSummary::Key(_, KeyCode::BTN_LEFT, 1) => {
+                    send_tap(serial, pointer.x, pointer.y)?
+                }
+                EventSummary::Key(_, key, value) if value == 1 => {
+                    eprintln!("ignored button/key press: {key:?}");
+                }
+                _ => {}
             }
-            _ => {}
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Pointer {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+impl Pointer {
+    fn centered(width: u32, height: u32) -> Self {
+        Self {
+            x: (width / 2) as i32,
+            y: (height / 2) as i32,
+            width: width as i32,
+            height: height as i32,
         }
     }
 
-    Ok(())
+    fn move_by(&mut self, x: i32, y: i32) {
+        self.x = (self.x + x).clamp(0, self.width - 1);
+        self.y = (self.y + y).clamp(0, self.height - 1);
+    }
+}
+
+fn test_swipe(serial: Option<&str>) -> Result<()> {
+    let (width, height) = tablet_size(serial)?;
+    send_swipe(
+        serial,
+        width as i32 / 4,
+        height as i32 / 2,
+        width as i32 * 3 / 4,
+        height as i32 / 2,
+        300,
+    )
+}
+
+fn test_tap(serial: Option<&str>) -> Result<()> {
+    let (width, height) = tablet_size(serial)?;
+    send_tap(serial, width as i32 / 2, height as i32 / 2)
 }
 
 fn tablet_size(serial: Option<&str>) -> Result<(u32, u32)> {
@@ -159,16 +238,74 @@ fn tablet_size(serial: Option<&str>) -> Result<(u32, u32)> {
     Ok((width.parse()?, height.parse()?))
 }
 
-fn send_key(serial: Option<&str>, key: &str) -> Result<()> {
+fn send_move(serial: Option<&str>, x: i32, y: i32) -> Result<()> {
+    // Ask Android to treat this as a mouse motion event, so Android can render
+    // its native pointer instead of interpreting movement as a touch gesture.
+    send_input(
+        serial,
+        [
+            "mouse",
+            "motionevent",
+            "MOVE",
+            &x.to_string(),
+            &y.to_string(),
+        ],
+    )
+}
+
+fn send_tap(serial: Option<&str>, x: i32, y: i32) -> Result<()> {
+    let x = x.to_string();
+    let y = y.to_string();
+    send_input(serial, ["mouse", "motionevent", "DOWN", &x, &y])?;
+    send_input(serial, ["mouse", "motionevent", "UP", &x, &y])
+}
+
+fn send_scroll(serial: Option<&str>, amount: i32) -> Result<()> {
+    let (width, height) = tablet_size(serial)?;
+    let x = (width / 2).to_string();
+    let start_y = (height / 2).to_string();
+    let end_y = ((height as i32 / 2) - amount.signum() * 300)
+        .clamp(0, height as i32 - 1)
+        .to_string();
+    send_input(
+        serial,
+        ["touchscreen", "swipe", &x, &start_y, &x, &end_y, "150"],
+    )
+}
+
+fn send_swipe(
+    serial: Option<&str>,
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+    duration_ms: i32,
+) -> Result<()> {
+    send_input(
+        serial,
+        [
+            "touchscreen",
+            "swipe",
+            &x1.to_string(),
+            &y1.to_string(),
+            &x2.to_string(),
+            &y2.to_string(),
+            &duration_ms.to_string(),
+        ],
+    )
+}
+
+fn send_input<const N: usize>(serial: Option<&str>, input_args: [&str; N]) -> Result<()> {
     let mut args = adb_args(serial);
-    args.extend(["shell", "input", "keyevent", key]);
+    args.extend(["shell", "input"]);
+    args.extend(input_args);
     let status = Command::new("adb")
         .args(&args)
         .stdout(Stdio::null())
         .status()
-        .context("Could not send Android key event")?;
+        .context("Could not send Android input event")?;
     if !status.success() {
-        bail!("ADB rejected Android key event");
+        bail!("ADB rejected Android input event");
     }
     Ok(())
 }

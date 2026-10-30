@@ -8,8 +8,10 @@ small, safe stages instead of grabbing your input devices immediately.
 
 - Lists readable `/dev/input/event*` devices.
 - Verifies that the paired Android device accepts an ADB input command.
-- Monitors one selected evdev device in diagnostic mode.
-- **Does not yet enable a global Hyprland toggle or forward pointer events.**
+- Monitors one selected relative-pointer device and forwards mouse movement,
+  left-clicks, and vertical scroll to Android with ADB.
+- **Does not yet enable a global Hyprland toggle, mouse-button hold/drag state,
+  keyboard forwarding, or a safe exclusive input grab.**
 
 The Android device needs Wireless debugging enabled and visible in:
 
@@ -42,11 +44,25 @@ Then run diagnostic mode **without** `--grab`:
 cargo run -- forward --device /dev/input/eventN
 ```
 
-Move the mouse or press keys. The program should print its events. This tests
-permissions and identifies the correct hardware before it can take exclusive
-control. Press `Ctrl+C` to stop.
+The first pointer-forwarding test uses read-only mode, so both Hyprland and
+Android receive the selected mouse's activity:
 
-`--grab` is deliberately present only for a later controlled test. An evdev
+```bash
+cargo run -- forward --device /dev/input/eventN
+```
+
+A virtual Android pointer starts at the tablet display center. Move the selected
+mouse to move it; its left click sends a tap and its vertical wheel sends a
+swipe. Use `Ctrl+C` to stop. You can verify mouse injection independently:
+
+```bash
+cargo run -- test-swipe
+cargo run -- test-tap
+```
+
+This milestone invokes `adb shell input` per event, so it is intentionally a
+functional proof—not low-latency production input. `--grab` is deliberately
+present only for a later controlled test. An evdev
 grab prevents Hyprland and other programs from receiving events from that one
 device. Do **not** use it until the bridge implements its local emergency
 escape chord and connection watchdog.
