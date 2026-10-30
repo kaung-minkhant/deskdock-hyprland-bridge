@@ -123,6 +123,36 @@ pub fn run(config: Config, shared: Shared) -> Result<()> {
     Ok(())
 }
 
+/// Poll Android's logical display size without ever blocking the input loop.
+/// Errors are logged here because rotation is an optional convenience; the
+/// previous valid size remains usable when ADB is briefly unavailable.
+struct RotationWorker {
+    receiver: Receiver<DisplaySize>,
+    thread: thread::JoinHandle<()>,
+}
+
+fn spawn_rotation_worker(serial: Option<String>, stop: Arc<AtomicBool>) -> RotationWorker {
+    let (sender, receiver) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        while !stop.load(Ordering::SeqCst) {
+            match android::logical_display_size(serial.as_deref()) {
+                Ok(size) if sender.send(size).is_err() => return,
+                Ok(_) => {}
+                Err(error) => eprintln!("Could not refresh Android display size: {error:#}"),
+            }
+            // Do not sleep the whole interval during shutdown.
+            let until = std::time::Instant::now() + ROTATION_CHECK_INTERVAL;
+            while std::time::Instant::now() < until {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+    });
+    RotationWorker { receiver, thread }
+}
+
 fn spawn_input_worker(
     configured: ConfiguredDevice,
     tablet_mode: Arc<AtomicBool>,
@@ -231,6 +261,12 @@ fn run_session(
     events: &Receiver<InputEvent>,
     shared: &Shared,
 ) -> Result<()> {
+    // Synergy mouse packets are only 12 bytes. Disable Nagle buffering so
+    // fast local pointer movement is delivered as fresh positions instead of
+    // being held briefly and released as a visible cursor jump.
+    stream
+        .set_nodelay(true)
+        .context("Could not disable TCP buffering for DeskDock")?;
     let tablet_mode: &AtomicBool = &shared.tablet_mode;
     synergy::handshake(&mut stream)?;
     synergy::send_frame(&mut stream, &synergy::server_options())?;
@@ -256,36 +292,39 @@ fn run_session(
     shared.connected.store(true, Ordering::SeqCst);
     eprintln!("DeskDock Synergy session active.");
 
+    let rotation_stop = Arc::new(AtomicBool::new(false));
+    let rotation_updates = config.tablet.follow_rotation.then(|| {
+        spawn_rotation_worker(config.tablet.adb_serial.clone(), Arc::clone(&rotation_stop))
+    });
+
     let mut display_size = display_size;
     let mut pointer = Pointer::centered(display_size.width, display_size.height);
     let mut tablet_active = false;
     let mut keyboard = KeyboardState::default();
-    let mut last_rotation_check = std::time::Instant::now() - ROTATION_CHECK_INTERVAL;
     while !shared.is_shutdown() {
-        if config.tablet.follow_rotation && last_rotation_check.elapsed() >= ROTATION_CHECK_INTERVAL
-        {
-            last_rotation_check = std::time::Instant::now();
-            match android::logical_display_size(config.tablet.adb_serial.as_deref()) {
-                Ok(size) if size != display_size => {
-                    display_size = size;
-                    pointer.resize(size.width, size.height);
+        // ADB is deliberately queried in a separate worker: `dumpsys input`
+        // can take tens of milliseconds, which must never pause forwarding.
+        if let Some(updates) = &rotation_updates {
+            while let Ok(size) = updates.receiver.try_recv() {
+                if size == display_size {
+                    continue;
+                }
+                display_size = size;
+                pointer.resize(size.width, size.height);
+                synergy::send_frame(
+                    &mut stream,
+                    &synergy::screen_info(display_size.width, display_size.height),
+                )?;
+                if tablet_active {
                     synergy::send_frame(
                         &mut stream,
-                        &synergy::screen_info(display_size.width, display_size.height),
+                        &synergy::mouse_move(pointer.x as i16, pointer.y as i16),
                     )?;
-                    if tablet_active {
-                        synergy::send_frame(
-                            &mut stream,
-                            &synergy::mouse_move(pointer.x as i16, pointer.y as i16),
-                        )?;
-                    }
-                    eprintln!(
-                        "Android rotation detected; pointer bounds updated to {}×{}.",
-                        size.width, size.height
-                    );
                 }
-                Ok(_) => {}
-                Err(error) => eprintln!("Could not refresh Android display size: {error:#}"),
+                eprintln!(
+                    "Android rotation detected; pointer bounds updated to {}×{}.",
+                    size.width, size.height
+                );
             }
         }
         let active = tablet_mode.load(Ordering::SeqCst);
@@ -335,6 +374,11 @@ fn run_session(
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => bail!("All configured input workers stopped"),
         }
+    }
+
+    rotation_stop.store(true, Ordering::SeqCst);
+    if let Some(worker) = rotation_updates {
+        let _ = worker.thread.join();
     }
 
     // Shutting down: never leave keys stuck or the pointer on Android.
