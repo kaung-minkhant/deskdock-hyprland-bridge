@@ -292,7 +292,7 @@ fn run_session(
         .set_nodelay(true)
         .context("Could not disable TCP buffering for DeskDock")?;
     let tablet_mode: &AtomicBool = &shared.tablet_mode;
-    synergy::handshake(&mut stream)?;
+    let protocol_version = synergy::handshake(&mut stream)?;
     synergy::send_frame(&mut stream, &synergy::server_options())?;
     let display_size = if config.tablet.follow_rotation {
         android::logical_display_size(config.tablet.adb_serial.as_deref()).with_context(|| {
@@ -368,7 +368,7 @@ fn run_session(
                 );
             } else {
                 // Never leave a key or modifier stuck down on Android.
-                keyboard.release_all(&mut stream)?;
+                keyboard.release_all(&mut stream, protocol_version)?;
                 synergy::send_frame(&mut stream, synergy::client_leave())?;
                 eprintln!("Linux mode: all configured devices were released to Hyprland.");
             }
@@ -382,6 +382,7 @@ fn run_session(
                     &mut stream,
                     &mut pointer,
                     &mut keyboard,
+                    protocol_version,
                     config.tablet.sensitivity,
                     tablet_mode,
                     event,
@@ -393,6 +394,7 @@ fn run_session(
                         &mut stream,
                         &mut pointer,
                         &mut keyboard,
+                        protocol_version,
                         config.tablet.sensitivity,
                         tablet_mode,
                         event,
@@ -411,7 +413,7 @@ fn run_session(
 
     // Shutting down: never leave keys stuck or the pointer on Android.
     if tablet_active {
-        keyboard.release_all(&mut stream)?;
+        keyboard.release_all(&mut stream, protocol_version)?;
         synergy::send_frame(&mut stream, synergy::client_leave())?;
     }
     Ok(())
@@ -421,14 +423,17 @@ fn handle_input_event(
     stream: &mut TcpStream,
     pointer: &mut Pointer,
     keyboard: &mut KeyboardState,
+    protocol_version: synergy::ProtocolVersion,
     sensitivity: i32,
     tablet_mode: &AtomicBool,
     event: InputEvent,
 ) -> Result<()> {
     let tablet_active = tablet_mode.load(Ordering::SeqCst);
     match event {
-        InputEvent::Key { code, down } if tablet_active => {
-            if keyboard.handle(stream, code, down)? == KeyAction::ReturnToLinux {
+        InputEvent::Key { code, down, repeat } if tablet_active => {
+            if keyboard.handle(stream, protocol_version, code, down, repeat)?
+                == KeyAction::ReturnToLinux
+            {
                 // The session loop sees the flag change and sends COUT.
                 tablet_mode.store(false, Ordering::SeqCst);
             }
@@ -483,15 +488,36 @@ fn handle_input_event(
 }
 
 enum InputEvent {
-    Motion { x: i32, y: i32 },
-    Button { down: bool, button: MouseButton },
-    DelayedTap { id: u64 },
-    Tap { id: u64 },
-    StartTapDrag { cancel_id: u64 },
-    Wheel { y: i32 },
+    Motion {
+        x: i32,
+        y: i32,
+    },
+    Button {
+        down: bool,
+        button: MouseButton,
+    },
+    DelayedTap {
+        id: u64,
+    },
+    Tap {
+        id: u64,
+    },
+    StartTapDrag {
+        cancel_id: u64,
+    },
+    Wheel {
+        y: i32,
+    },
     BackGesture,
-    Key { code: KeyCode, down: bool },
-    Error { path: PathBuf, error: String },
+    Key {
+        code: KeyCode,
+        down: bool,
+        repeat: bool,
+    },
+    Error {
+        path: PathBuf,
+        error: String,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -520,10 +546,10 @@ fn translate_event(
     match kind {
         DeviceKind::Mouse => mouse.translate(event),
         DeviceKind::Keyboard => match event {
-            // Ignore auto-repeat (value 2); Android generates its own.
-            EventSummary::Key(_, code, value @ (0 | 1)) => Some(InputEvent::Key {
+            EventSummary::Key(_, code, value @ 0..=2) => Some(InputEvent::Key {
                 code,
-                down: value == 1,
+                down: value != 0,
+                repeat: value == 2,
             }),
             _ => None,
         },
@@ -976,6 +1002,29 @@ mod tests {
         position(&mut touchpad, 500, 500);
         position(&mut touchpad, 520, 500);
         assert!(tracking(&mut touchpad, -1).is_none());
+    }
+
+    #[test]
+    fn keyboard_repeat_is_forwarded_to_keyboard_state() {
+        let mut mouse = MouseState::default();
+        let mut touchpad = touchpad();
+        assert!(matches!(
+            translate_event(
+                DeviceKind::Keyboard,
+                &mut mouse,
+                &mut touchpad,
+                EventSummary::Key(
+                    evdev::KeyEvent::new(KeyCode::KEY_BACKSPACE, 2),
+                    KeyCode::KEY_BACKSPACE,
+                    2
+                ),
+            ),
+            Some(InputEvent::Key {
+                code: KeyCode::KEY_BACKSPACE,
+                down: true,
+                repeat: true,
+            })
+        ));
     }
 }
 

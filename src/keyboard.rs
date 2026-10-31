@@ -1,7 +1,7 @@
 use crate::synergy;
 use anyhow::Result;
 use evdev::KeyCode;
-use std::{collections::BTreeMap, net::TcpStream};
+use std::{collections::BTreeMap, net::TcpStream, sync::OnceLock};
 
 // Synergy/Barrier modifier mask bits.
 const SHIFT: u16 = 0x0001;
@@ -9,10 +9,32 @@ const CONTROL: u16 = 0x0002;
 const ALT: u16 = 0x0004;
 const SUPER: u16 = 0x0010;
 
+fn debug_logging_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("HYPR_ANDROID_BRIDGE_DEBUG_KEYS").is_some_and(|value| value != "0")
+    })
+}
+
+fn log_key_event(action: &str, code: KeyCode, id: Option<u16>, modifiers: u16, button: u16) {
+    if debug_logging_enabled() {
+        let id = id.map_or_else(|| "unmapped".to_owned(), |id| format!("0x{id:04X}"));
+        eprintln!(
+            "keyboard {action}: evdev={} id={id} modifiers=0x{modifiers:04X} button={button}",
+            code.code()
+        );
+    }
+}
+
 // Synergy/Barrier key IDs for non-character keys (X11 keysym - 0x1000).
+// DeskDock's key lookup table contains these adjusted values (for example,
+// Escape is 0xEF1B / decimal 61211), not the raw X11 keysym 0xFF1B.
 const KEY_BACKSPACE: u16 = 0xEF08;
 const KEY_TAB: u16 = 0xEF09;
 const KEY_RETURN: u16 = 0xEF0D;
+// DeskDock only maps the keypad-space X11 keysym (0xFF80 - 0x1000),
+// not the ordinary control-character space keysym, to Android KEYCODE_SPACE.
+const KEY_SPACE: u16 = 0xEF80;
 const KEY_SCROLL_LOCK: u16 = 0xEF14;
 const KEY_ESCAPE: u16 = 0xEF1B;
 const KEY_DELETE: u16 = 0xEFFF;
@@ -96,7 +118,6 @@ const PRINTABLE: &[(KeyCode, char, char)] = &[
     (KeyCode::KEY_COMMA, ',', '<'),
     (KeyCode::KEY_DOT, '.', '>'),
     (KeyCode::KEY_SLASH, '/', '?'),
-    (KeyCode::KEY_SPACE, ' ', ' '),
 ];
 
 const FUNCTION_KEYS: &[KeyCode] = &[
@@ -145,6 +166,7 @@ pub fn key_id(code: KeyCode, shift: bool) -> Option<u16> {
         KeyCode::KEY_TAB if shift => KEY_LEFT_TAB,
         KeyCode::KEY_TAB => KEY_TAB,
         KeyCode::KEY_ENTER => KEY_RETURN,
+        KeyCode::KEY_SPACE => KEY_SPACE,
         KeyCode::KEY_DELETE => KEY_DELETE,
         KeyCode::KEY_INSERT => KEY_INSERT,
         KeyCode::KEY_HOME => KEY_HOME,
@@ -201,48 +223,165 @@ pub enum KeyAction {
 #[derive(Default)]
 pub struct KeyboardState {
     /// evdev key code → Barrier key ID that was sent on press.
-    held: BTreeMap<u16, u16>,
+    held: BTreeMap<u16, HeldKey>,
+}
+
+#[derive(Clone, Copy)]
+struct HeldKey {
+    id: u16,
+    modifiers: u16,
 }
 
 impl KeyboardState {
     pub fn handle(
         &mut self,
         stream: &mut TcpStream,
+        version: synergy::ProtocolVersion,
         code: KeyCode,
         down: bool,
+        repeat: bool,
     ) -> Result<KeyAction> {
+        if repeat {
+            if code == KeyCode::KEY_BACKSPACE {
+                return self.repeat_backspace(stream, version);
+            }
+            log_key_event(
+                "repeat-ignored",
+                code,
+                self.held.get(&code.code()).map(|key| key.id),
+                self.modifier_mask(),
+                key_button(code),
+            );
+            return Ok(KeyAction::Handled);
+        }
+
         if down {
             if code == KeyCode::KEY_T && self.escape_chord_held() {
-                self.release_all(stream)?;
+                log_key_event(
+                    "escape-chord",
+                    code,
+                    None,
+                    self.modifier_mask(),
+                    key_button(code),
+                );
+                self.release_all(stream, version)?;
                 return Ok(KeyAction::ReturnToLinux);
             }
             if self.held.contains_key(&code.code()) {
+                log_key_event(
+                    "repeat-ignored",
+                    code,
+                    self.held.get(&code.code()).map(|key| key.id),
+                    self.modifier_mask(),
+                    key_button(code),
+                );
                 return Ok(KeyAction::Handled);
             }
             let Some(id) = key_id(code, self.shift_held()) else {
+                log_key_event(
+                    "down-ignored",
+                    code,
+                    None,
+                    self.modifier_mask(),
+                    key_button(code),
+                );
                 return Ok(KeyAction::Handled);
             };
-            self.held.insert(code.code(), id);
+            let modifiers = self.modifier_mask();
+            log_key_event("down", code, Some(id), modifiers, key_button(code));
+            self.held.insert(code.code(), HeldKey { id, modifiers });
             synergy::send_frame(
                 stream,
-                &synergy::key_down(id, self.modifier_mask(), key_button(code)),
+                &synergy::key_down(version, id, modifiers, key_button(code)),
             )?;
-        } else if let Some(id) = self.held.remove(&code.code()) {
+        } else if let Some(key) = self.held.remove(&code.code()) {
+            log_key_event("up", code, Some(key.id), key.modifiers, key_button(code));
             synergy::send_frame(
                 stream,
-                &synergy::key_up(id, self.modifier_mask(), key_button(code)),
+                &synergy::key_up(version, key.id, key.modifiers, key_button(code)),
             )?;
+        } else {
+            log_key_event(
+                "up-ignored",
+                code,
+                None,
+                self.modifier_mask(),
+                key_button(code),
+            );
         }
+        Ok(KeyAction::Handled)
+    }
+
+    /// Forward a Linux repeat as another Backspace press/release pair.
+    ///
+    /// DeskDock's Android event constructor uses a zero repeat count, so
+    /// forwarding a second `DKDN` alone does not trigger Android's deletion
+    /// repeat. A complete pair gives the focused app one additional deletion.
+    /// Only Backspace uses Linux repeat: all other keys keep Android's own
+    /// repeat behavior.
+    fn repeat_backspace(
+        &mut self,
+        stream: &mut TcpStream,
+        version: synergy::ProtocolVersion,
+    ) -> Result<KeyAction> {
+        let Some(key) = self.held.get(&KeyCode::KEY_BACKSPACE.code()).copied() else {
+            log_key_event(
+                "repeat-ignored",
+                KeyCode::KEY_BACKSPACE,
+                None,
+                self.modifier_mask(),
+                key_button(KeyCode::KEY_BACKSPACE),
+            );
+            return Ok(KeyAction::Handled);
+        };
+
+        log_key_event(
+            "backspace-repeat",
+            KeyCode::KEY_BACKSPACE,
+            Some(key.id),
+            key.modifiers,
+            key_button(KeyCode::KEY_BACKSPACE),
+        );
+        synergy::send_frame(
+            stream,
+            &synergy::key_up(
+                version,
+                key.id,
+                key.modifiers,
+                key_button(KeyCode::KEY_BACKSPACE),
+            ),
+        )?;
+        synergy::send_frame(
+            stream,
+            &synergy::key_down(
+                version,
+                key.id,
+                key.modifiers,
+                key_button(KeyCode::KEY_BACKSPACE),
+            ),
+        )?;
         Ok(KeyAction::Handled)
     }
 
     /// Release everything Android believes is held. Called when leaving tablet
     /// mode so no modifier or key stays stuck on the tablet.
-    pub fn release_all(&mut self, stream: &mut TcpStream) -> Result<()> {
-        for (code, id) in std::mem::take(&mut self.held) {
+    pub fn release_all(
+        &mut self,
+        stream: &mut TcpStream,
+        version: synergy::ProtocolVersion,
+    ) -> Result<()> {
+        for (code, key) in std::mem::take(&mut self.held) {
+            let code = KeyCode::new(code);
+            log_key_event(
+                "release-all",
+                code,
+                Some(key.id),
+                key.modifiers,
+                key_button(code),
+            );
             synergy::send_frame(
                 stream,
-                &synergy::key_up(id, 0, key_button(KeyCode::new(code))),
+                &synergy::key_up(version, key.id, key.modifiers, key_button(code)),
             )?;
         }
         Ok(())
@@ -279,12 +418,12 @@ mod tests {
         assert_eq!(key_id(KeyCode::KEY_A, false), Some(u16::from(b'a')));
         assert_eq!(key_id(KeyCode::KEY_A, true), Some(u16::from(b'A')));
         assert_eq!(key_id(KeyCode::KEY_1, true), Some(u16::from(b'!')));
-        assert_eq!(key_id(KeyCode::KEY_SPACE, false), Some(u16::from(b' ')));
     }
 
     #[test]
-    fn special_keys_use_barrier_ids() {
+    fn special_keys_use_deskdock_barrier_ids() {
         assert_eq!(key_id(KeyCode::KEY_ENTER, false), Some(0xEF0D));
+        assert_eq!(key_id(KeyCode::KEY_SPACE, false), Some(0xEF80));
         assert_eq!(key_id(KeyCode::KEY_ESC, false), Some(0xEF1B));
         assert_eq!(key_id(KeyCode::KEY_F1, false), Some(0xEFBE));
         assert_eq!(key_id(KeyCode::KEY_F12, false), Some(0xEFC9));
@@ -302,10 +441,20 @@ mod tests {
     fn modifier_mask_tracks_held_modifiers() {
         let mut state = KeyboardState::default();
         assert!(!state.escape_chord_held());
-        state.held.insert(KeyCode::KEY_LEFTMETA.code(), KEY_SUPER_L);
-        state
-            .held
-            .insert(KeyCode::KEY_RIGHTSHIFT.code(), KEY_SHIFT_R);
+        state.held.insert(
+            KeyCode::KEY_LEFTMETA.code(),
+            HeldKey {
+                id: KEY_SUPER_L,
+                modifiers: 0,
+            },
+        );
+        state.held.insert(
+            KeyCode::KEY_RIGHTSHIFT.code(),
+            HeldKey {
+                id: KEY_SHIFT_R,
+                modifiers: SUPER,
+            },
+        );
         assert_eq!(state.modifier_mask(), SUPER | SHIFT);
         assert!(state.escape_chord_held());
         state.held.remove(&KeyCode::KEY_LEFTMETA.code());

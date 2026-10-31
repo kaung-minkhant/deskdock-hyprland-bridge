@@ -30,7 +30,7 @@ It does **not** use DeskDock's legacy X11 input capture, emulate its private And
 - Keyboard forwarding is opt-in: a keyboard is forwarded only if it is listed with `kind = "keyboard"`. Otherwise it stays local.
 - Keyboard forwarding assumes a **US layout** on the Linux side. Keys are sent as characters, so the Android keyboard layout decides the rest.
 - Supported keys: letters, digits, punctuation, Enter/Backspace/Tab/Esc, arrows, Home/End/PgUp/PgDn, Insert/Delete, F1–F12, keypad, and modifiers. Media, volume, and brightness keys are not forwarded.
-- Key repeat is left to Android; Linux auto-repeat events are ignored.
+- Android provides normal key repeat. Linux auto-repeat events are ignored except for Backspace, which is forwarded as repeated press/release pairs so holding it continues deleting.
 - The current Hyprland binding still invokes the development binary; installing the Nix package and updating the bind is the next operational step.
 
 ## Prerequisites
@@ -145,6 +145,14 @@ hypr-android-bridge run
 ```
 
 The command starts the service in the background and returns to the shell. Use the tray icon to control or quit it. For live diagnostics while developing, use `hypr-android-bridge run --foreground`.
+
+For keyboard packet diagnostics, enable the opt-in key log while running in the foreground:
+
+```bash
+HYPR_ANDROID_BRIDGE_DEBUG_KEYS=1 hypr-android-bridge run --foreground
+```
+
+It logs each captured evdev key, its DeskDock key ID, modifier mask, physical-key button, and the exact `DKDN`/`DKUP` payload bytes. Do not use this mode while typing sensitive text: pressed keys are written to the terminal.
 
 This single command:
 
