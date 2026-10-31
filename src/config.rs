@@ -11,6 +11,8 @@ const DEFAULT_PORT: u16 = 24800;
 const DEFAULT_WIDTH: i16 = 1800;
 const DEFAULT_HEIGHT: i16 = 2880;
 const DEFAULT_SENSITIVITY: i32 = 4;
+const DEFAULT_TOUCHPAD_SCROLL_PERCENT: i32 = 5;
+const DEFAULT_TOUCHPAD_TAP_DELAY_MS: u64 = 500;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -66,6 +68,12 @@ pub struct Tablet {
     pub height: i16,
     #[serde(default = "default_sensitivity")]
     pub sensitivity: i32,
+    /// Touchpad travel, as a percent of its height, per forwarded scroll step.
+    #[serde(default = "default_touchpad_scroll_percent")]
+    pub touchpad_scroll_percent: i32,
+    /// Delay a single tap so a following tap-and-hold can become a drag.
+    #[serde(default = "default_touchpad_tap_delay_ms")]
+    pub touchpad_tap_delay_ms: u64,
     /// Refresh Android's current logical size while the bridge is running.
     #[serde(default)]
     pub follow_rotation: bool,
@@ -117,6 +125,18 @@ impl Config {
         if self.tablet.sensitivity <= 0 {
             bail!("{} must use a positive tablet sensitivity", path.display());
         }
+        if !(1..=100).contains(&self.tablet.touchpad_scroll_percent) {
+            bail!(
+                "{} must use tablet.touchpad_scroll_percent between 1 and 100",
+                path.display()
+            );
+        }
+        if !(1..=2_000).contains(&self.tablet.touchpad_tap_delay_ms) {
+            bail!(
+                "{} must use tablet.touchpad_tap_delay_ms between 1 and 2000",
+                path.display()
+            );
+        }
         if let Some(serial) = &self.tablet.adb_serial
             && serial.trim().is_empty()
         {
@@ -162,6 +182,8 @@ impl Default for Tablet {
             width: default_width(),
             height: default_height(),
             sensitivity: default_sensitivity(),
+            touchpad_scroll_percent: default_touchpad_scroll_percent(),
+            touchpad_tap_delay_ms: default_touchpad_tap_delay_ms(),
             follow_rotation: false,
             adb_serial: None,
         }
@@ -213,6 +235,10 @@ port = 24800
 width = 1800
 height = 2880
 sensitivity = 4
+# Touchpad travel (percent of its height) per Android scroll step.
+touchpad_scroll_percent = 5
+# Delay before forwarding a single tap, allowing a following tap-and-hold to drag.
+touchpad_tap_delay_ms = 500
 # Use USB ADB to update the pointer bounds after an Android rotation.
 follow_rotation = true
 # adb_serial = "your-usb-device-serial"
@@ -263,4 +289,10 @@ fn default_height() -> i16 {
 }
 fn default_sensitivity() -> i32 {
     DEFAULT_SENSITIVITY
+}
+fn default_touchpad_scroll_percent() -> i32 {
+    DEFAULT_TOUCHPAD_SCROLL_PERCENT
+}
+fn default_touchpad_tap_delay_ms() -> u64 {
+    DEFAULT_TOUCHPAD_TAP_DELAY_MS
 }

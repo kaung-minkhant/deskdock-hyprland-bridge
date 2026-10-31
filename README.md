@@ -23,7 +23,7 @@ It does **not** use DeskDock's legacy X11 input capture, emulate its private And
 
 ## Current limitations
 
-- Touchpad support is initially single-finger relative movement only. Multi-finger gestures, scrolling, tapping, and pinch/zoom are not forwarded.
+- Touchpad support includes single-finger relative movement, single-tap left clicks, tap-and-drag (tap, then tap and hold), two-finger vertical scrolling, and a two-finger right swipe that sends a right click. Single-tap clicks are delayed by 500 ms so a tap-and-drag does not become a double-click. Configure DeskDock's right mouse button as Android **Back** in its **Mouse button mapping** UI.
 - Mouse right/middle buttons are forwarded to DeskDock. Configure their Android Back, Home, Menu, and Recent-apps actions in DeskDock's **Mouse button mapping** UI, including its long-press options.
 - Horizontal wheel, touchpad gestures, and extra mouse buttons are not forwarded.
 - Set `tablet.follow_rotation = true` to follow Android portrait/landscape changes over the existing trusted USB ADB connection. Otherwise, configure the current logical orientation manually.
@@ -72,6 +72,10 @@ port = 24800
 width = 1800
 height = 2880
 sensitivity = 4
+# Touchpad travel (percent of its height) per Android scroll step. Higher is slower.
+touchpad_scroll_percent = 5
+# Delay before forwarding a single tap, allowing a following tap-and-hold to drag.
+touchpad_tap_delay_ms = 500
 # Query Android's logical (rotated) bounds through USB ADB every 500 ms.
 follow_rotation = true
 # Optional with exactly one authorized USB device; set it to pin a device.
